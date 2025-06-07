@@ -44,12 +44,28 @@ console.log("Validation check:", {
 
     // 3. Transcribe Voice Message (if any)
     if (mediaUrl && req.body.MediaContentType0 === 'audio/ogg') {
-      const transcription = await openai.audio.transcriptions.create({
-        file: await fetch(mediaUrl).then(res => res.blob()),
-        model: "whisper-1"
-      });
-      textToProcess = transcription.text;
-    }
+  try {
+    console.log("Fetching audio from:", mediaUrl); // Debug log
+    
+    const response = await fetch(mediaUrl);
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    
+    const audioBlob = await response.blob();
+    console.log("Audio blob size:", audioBlob.size); // Debug log
+
+    const transcription = await openai.audio.transcriptions.create({
+      file: new File([audioBlob], "voice-message.ogg", { type: "audio/ogg" }),
+      model: "whisper-1"
+    });
+    
+    textToProcess = transcription.text;
+    console.log("Transcription:", transcription.text); // Debug log
+    
+  } catch (error) {
+    console.error("Voice processing failed:", error);
+    textToProcess = "[Voice message processing failed]";
+  }
+}
 
     // 4. Get AI Response
     const aiResponse = await openai.chat.completions.create({
