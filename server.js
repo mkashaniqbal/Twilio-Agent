@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const { OpenAI } = require('openai');
 const twilio = require('twilio');
+const { File } = require('form-data');
 const fetch = require('node-fetch');
 const app = express();
 const openai = new OpenAI(process.env.OPENAI_API_KEY);
