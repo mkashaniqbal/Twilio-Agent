@@ -2,8 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const { OpenAI } = require('openai');
 const twilio = require('twilio');
-const { File } = require('form-data');
+const FormData = require('form-data'); // Changed from { File } to FormData
 const fetch = require('node-fetch');
+const fs = require('fs');
 const app = express();
 
 // Initialize APIs with enhanced configuration
@@ -54,15 +55,17 @@ app.post('/whatsapp', async (req, res) => {
         
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), CONFIG.VOICE_TIMEOUT);
-          // Add Twilio auth headers
-    const response = await fetch(req.body.MediaUrl0, {
-      headers: {
-        'Authorization': 'Basic ' + Buffer.from(
-          `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-        ).toString('base64')
-      },
-      signal: controller.signal
-    });
+        
+        // Add Twilio auth headers
+        const response = await fetch(req.body.MediaUrl0, {
+          headers: {
+            'Authorization': 'Basic ' + Buffer.from(
+              `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+            ).toString('base64')
+          },
+          signal: controller.signal
+        });
+        
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
@@ -72,19 +75,31 @@ app.post('/whatsapp', async (req, res) => {
           throw new Error('Invalid audio content type');
         }
 
-        const audioBuffer = await response.arrayBuffer();
-        console.log(`Audio received (${audioBuffer.byteLength} bytes)`);
+        // Create temporary file for the audio
+        const tempFilePath = `/tmp/voice_${Date.now()}.ogg`;
+        const fileStream = fs.createWriteStream(tempFilePath);
+        await new Promise((resolve, reject) => {
+          response.body.pipe(fileStream);
+          response.body.on('error', reject);
+          fileStream.on('finish', resolve);
+        });
+
+        // Create FormData and append the file
+        const form = new FormData();
+        form.append('file', fs.createReadStream(tempFilePath), {
+          filename: 'voice_message.ogg',
+          contentType: 'audio/ogg'
+        });
 
         const transcription = await openai.audio.transcriptions.create({
-          file: new File(
-            [new Uint8Array(audioBuffer)],
-            "meta_glasses_voice.ogg",
-            { type: "audio/ogg" }
-          ),
+          file: form,
           model: CONFIG.WHISPER_MODEL,
           response_format: "text",
           temperature: 0.2 // More accurate transcriptions
         });
+        
+        // Clean up temporary file
+        fs.unlinkSync(tempFilePath);
         
         textToProcess = transcription.text;
         console.log("Transcription success:", textToProcess);
