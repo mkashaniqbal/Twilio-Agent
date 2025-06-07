@@ -5,76 +5,76 @@ const twilio = require('twilio');
 const { File } = require('form-data');
 const fetch = require('node-fetch');
 const app = express();
+
+// Initialize APIs
 const openai = new OpenAI(process.env.OPENAI_API_KEY);
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-app.use(express.json());
 
+// Middleware
+app.use(express.json());
 app.use(express.urlencoded({ 
   extended: false,
   verify: (req, res, buf) => {
     req.rawBody = buf.toString(); // Needed for validation
   }
 }));
+
+// Meta Glasses Optimizations
+const VOICE_TIMEOUT = 5000; // 5s timeout for voice processing
+const GPT_MODEL = "gpt-4o";
+
 // WhatsApp Webhook
 app.post('/whatsapp', async (req, res) => {
   try {
-    // 1. Verify Twilio Signature (SECURITY)
-    const twilioSignature = req.headers['x-twilio-signature'];
-    const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
-    const params = req.body;
+    // 1. Temporary signature validation disable
+    console.log("Incoming request from:", req.body.From);
     
-    // if (!twilio.validateRequest(
-    //   process.env.TWILIO_AUTH_TOKEN,
-    //   twilioSignature,
-    //   url,
-    //   params
-    // )) {
-    //   return res.status(403).send('Forbidden');
-    // }
-console.log("Validation check:", {
-  token: process.env.TWILIO_AUTH_TOKEN?.slice(0, 5) + '...',
-  signature: twilioSignature,
-  url: url,
-  computedUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`
-});
-    // 2. Process Incoming Message
-    const userMessage = req.body.Body;
-    const mediaUrl = req.body.MediaUrl0;
-
-    let textToProcess = userMessage;
-
-    // 3. Transcribe Voice Message (if any)
-    if (mediaUrl && req.body.MediaContentType0 === 'audio/ogg') {
-  try {
-    console.log("Fetching audio from:", mediaUrl); // Debug log
+    // 2. Process incoming message
+    let textToProcess = req.body.Body || '';
     
-    const response = await fetch(mediaUrl);
-    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-    
-    const audioBlob = await response.blob();
-    console.log("Audio blob size:", audioBlob.size); // Debug log
+    // 3. Voice message handling (Meta Glasses compatible)
+    if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
+      try {
+        console.log("Processing voice message from:", req.body.MediaUrl0);
+        
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), VOICE_TIMEOUT);
+        
+        const response = await fetch(req.body.MediaUrl0, { 
+          signal: controller.signal 
+        });
+        
+        if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+        
+        const audioBlob = await response.blob();
+        console.log(`Audio received (${audioBlob.size} bytes)`);
+        
+        const transcription = await openai.audio.transcriptions.create({
+          file: new File([audioBlob], "voice.ogg", { type: "audio/ogg" }),
+          model: "whisper-1"
+        });
+        
+        textToProcess = transcription.text;
+        console.log("Transcription success:", textToProcess);
+        
+      } catch (error) {
+        console.error("Voice processing error:", error);
+        textToProcess = "[Couldn't process voice message. Please try again or type your message.]";
+      }
+    }
 
-    const transcription = await openai.audio.transcriptions.create({
-      file: new File([audioBlob], "voice-message.ogg", { type: "audio/ogg" }),
-      model: "whisper-1"
-    });
-    
-    textToProcess = transcription.text;
-    console.log("Transcription:", transcription.text); // Debug log
-    
-  } catch (error) {
-    console.error("Voice processing failed:", error);
-    textToProcess = "[Voice message processing failed]";
-  }
-}
+    // 4. Get AI response (optimized for glasses)
+    const aiResponse = await Promise.race([
+      openai.chat.completions.create({
+        model: GPT_MODEL,
+        messages: [{ role: "user", content: textToProcess }],
+        max_tokens: 150 // Shorter responses for glasses
+      }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('AI response timeout')), VOICE_TIMEOUT)
+)]);
 
-    // 4. Get AI Response
-    const aiResponse = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [{ role: "user", content: textToProcess }]
-    });
-
-    // 5. Send Reply via Twilio
+    // 5. Send reply
     await twilioClient.messages.create({
       body: aiResponse.choices[0].message.content,
       from: req.body.To,
@@ -83,10 +83,13 @@ console.log("Validation check:", {
 
     res.status(200).end();
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Endpoint error:', error);
     res.status(500).send('Server Error');
   }
 });
+
+// Health check endpoint
+app.get('/', (req, res) => res.send('WhatsApp AI Bot is running'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
