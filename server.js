@@ -6,6 +6,7 @@ const fetch = require('node-fetch');
 const app = express();
 const openai = new OpenAI(process.env.OPENAI_API_KEY);
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+app.use(express.json());
 
 app.use(express.urlencoded({ extended: false }));
 
