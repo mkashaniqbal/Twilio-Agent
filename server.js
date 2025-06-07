@@ -54,14 +54,15 @@ app.post('/whatsapp', async (req, res) => {
         
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), CONFIG.VOICE_TIMEOUT);
-        
-        const response = await fetch(req.body.MediaUrl0, { 
-          signal: controller.signal,
-          headers: {
-            'User-Agent': 'WhatsApp-Meta-Glasses-Bot/1.0'
-          }
-        });
-        
+          // Add Twilio auth headers
+    const response = await fetch(req.body.MediaUrl0, {
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(
+          `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+        ).toString('base64')
+      },
+      signal: controller.signal
+    });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
