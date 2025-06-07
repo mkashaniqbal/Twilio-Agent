@@ -8,8 +8,12 @@ const openai = new OpenAI(process.env.OPENAI_API_KEY);
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 app.use(express.json());
 
-app.use(express.urlencoded({ extended: false }));
-
+app.use(express.urlencoded({ 
+  extended: false,
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString(); // Needed for validation
+  }
+}));
 // WhatsApp Webhook
 app.post('/whatsapp', async (req, res) => {
   try {
@@ -26,7 +30,12 @@ app.post('/whatsapp', async (req, res) => {
     // )) {
     //   return res.status(403).send('Forbidden');
     // }
-
+console.log("Validation check:", {
+  token: process.env.TWILIO_AUTH_TOKEN?.slice(0, 5) + '...',
+  signature: twilioSignature,
+  url: url,
+  computedUrl: `${req.protocol}://${req.get('host')}${req.originalUrl}`
+});
     // 2. Process Incoming Message
     const userMessage = req.body.Body;
     const mediaUrl = req.body.MediaUrl0;
