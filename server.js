@@ -18,14 +18,14 @@ app.post('/whatsapp', async (req, res) => {
     const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
     const params = req.body;
     
-    if (!twilio.validateRequest(
-      process.env.TWILIO_AUTH_TOKEN,
-      twilioSignature,
-      url,
-      params
-    )) {
-      return res.status(403).send('Forbidden');
-    }
+    // if (!twilio.validateRequest(
+    //   process.env.TWILIO_AUTH_TOKEN,
+    //   twilioSignature,
+    //   url,
+    //   params
+    // )) {
+    //   return res.status(403).send('Forbidden');
+    // }
 
     // 2. Process Incoming Message
     const userMessage = req.body.Body;
