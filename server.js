@@ -6,52 +6,83 @@ const { File } = require('form-data');
 const fetch = require('node-fetch');
 const app = express();
 
-// Initialize APIs
-const openai = new OpenAI(process.env.OPENAI_API_KEY);
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+// Initialize APIs with enhanced configuration
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 10000 // 10-second timeout for all OpenAI requests
+});
 
-// Middleware
-app.use(express.json());
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+// Enhanced middleware for Meta Glasses compatibility
+app.use(express.json({
+  limit: '10kb' // Prevent large payloads
+}));
+
 app.use(express.urlencoded({ 
   extended: false,
   verify: (req, res, buf) => {
-    req.rawBody = buf.toString(); // Needed for validation
+    req.rawBody = buf.toString();
   }
 }));
 
-// Meta Glasses Optimizations
-const VOICE_TIMEOUT = 5000; // 5s timeout for voice processing
-const GPT_MODEL = "gpt-4o";
+// Constants optimized for WhatsApp + Meta Glasses
+const CONFIG = {
+  VOICE_TIMEOUT: 4500, // 4.5s timeout (under WhatsApp's 5s limit)
+  GPT_MODEL: "gpt-4o-2024-05-13", // Specific model version
+  MAX_TOKENS: 120, // Shorter responses for glasses
+  WHISPER_MODEL: "whisper-1"
+};
 
-// WhatsApp Webhook
+// Enhanced WhatsApp Webhook
 app.post('/whatsapp', async (req, res) => {
   try {
-    // 1. Temporary signature validation disable
     console.log("Incoming request from:", req.body.From);
     
-    // 2. Process incoming message
+    // Process message with fallback
     let textToProcess = req.body.Body || '';
-    
-    // 3. Voice message handling (Meta Glasses compatible)
+    let isVoiceMessage = false;
+
+    // Voice message processing with robust error handling
     if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
+      isVoiceMessage = true;
       try {
         console.log("Processing voice message from:", req.body.MediaUrl0);
         
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), VOICE_TIMEOUT);
+        const timeout = setTimeout(() => controller.abort(), CONFIG.VOICE_TIMEOUT);
         
         const response = await fetch(req.body.MediaUrl0, { 
-          signal: controller.signal 
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'WhatsApp-Meta-Glasses-Bot/1.0'
+          }
         });
         
-        if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
-        
-        const audioBlob = await response.blob();
-        console.log(`Audio received (${audioBlob.size} bytes)`);
-        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('audio/ogg')) {
+          throw new Error('Invalid audio content type');
+        }
+
+        const audioBuffer = await response.arrayBuffer();
+        console.log(`Audio received (${audioBuffer.byteLength} bytes)`);
+
         const transcription = await openai.audio.transcriptions.create({
-          file: new File([audioBlob], "voice.ogg", { type: "audio/ogg" }),
-          model: "whisper-1"
+          file: new File(
+            [new Uint8Array(audioBuffer)],
+            "meta_glasses_voice.ogg",
+            { type: "audio/ogg" }
+          ),
+          model: CONFIG.WHISPER_MODEL,
+          response_format: "text",
+          temperature: 0.2 // More accurate transcriptions
         });
         
         textToProcess = transcription.text;
@@ -59,37 +90,83 @@ app.post('/whatsapp', async (req, res) => {
         
       } catch (error) {
         console.error("Voice processing error:", error);
-        textToProcess = "[Couldn't process voice message. Please try again or type your message.]";
+        textToProcess = isVoiceMessage 
+          ? "[Voice note processing failed. Please try again or type your message.]"
+          : textToProcess;
       }
     }
 
-    // 4. Get AI response (optimized for glasses)
+    // AI response with optimized timeout
     const aiResponse = await Promise.race([
       openai.chat.completions.create({
-        model: GPT_MODEL,
-        messages: [{ role: "user", content: textToProcess }],
-        max_tokens: 150 // Shorter responses for glasses
+        model: CONFIG.GPT_MODEL,
+        messages: [{ 
+          role: "user", 
+          content: textToProcess || "[Empty message received]"
+        }],
+        max_tokens: CONFIG.MAX_TOKENS,
+        temperature: 0.7
       }),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('AI response timeout')), VOICE_TIMEOUT)
-)]);
+        setTimeout(() => reject(new Error('AI response timeout')), CONFIG.VOICE_TIMEOUT)
+      )
+    ]);
 
-    // 5. Send reply
+    // Format response for Meta Glasses
+    const replyText = aiResponse.choices[0].message.content
+      .replace(/\n/g, ' ') // Remove newlines for better glasses display
+      .substring(0, 160); // Truncate to SMS limit
+
     await twilioClient.messages.create({
-      body: aiResponse.choices[0].message.content,
+      body: replyText,
       from: req.body.To,
-      to: req.body.From
+      to: req.body.From,
+      shortenUrls: true // Optimize for glasses
     });
 
     res.status(200).end();
   } catch (error) {
     console.error('Endpoint error:', error);
+    try {
+      // Attempt to send error notification
+      await twilioClient.messages.create({
+        body: "Bot encountered an error. Please try again.",
+        from: req.body.To,
+        to: req.body.From
+      });
+    } catch (twilioError) {
+      console.error("Failed to send error notification:", twilioError);
+    }
     res.status(500).send('Server Error');
   }
 });
 
-// Health check endpoint
-app.get('/', (req, res) => res.send('WhatsApp AI Bot is running'));
+// Enhanced health check
+app.get('/', (req, res) => {
+  res.json({
+    status: 'running',
+    version: '1.0',
+    capabilities: {
+      whatsapp: true,
+      voice_transcription: true,
+      gpt_model: CONFIG.GPT_MODEL
+    }
+  });
+});
 
+// Start server with enhanced error handling
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const server = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+server.on('error', (error) => {
+  console.error('Server error:', error);
+  process.exit(1);
+});
+
+process.on('SIGTERM', () => {
+  server.close(() => {
+    console.log('Server gracefully shutdown');
+  });
+});
