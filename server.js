@@ -44,65 +44,51 @@ app.post('/whatsapp', async (req, res) => {
     let isVoiceMessage = false;
 
     // Voice message processing
-    if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
-      isVoiceMessage = true;
-      try {
-        console.log("Processing voice message from:", req.body.MediaUrl0);
-        
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), CONFIG.VOICE_TIMEOUT);
-        
-        const response = await fetch(req.body.MediaUrl0, {
-          headers: {
-            'Authorization': 'Basic ' + Buffer.from(
-              `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-            ).toString('base64')
-          },
-          signal: controller.signal
-        });
-        
-        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+   if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
+  isVoiceMessage = true;
+  try {
+    console.log("Processing voice message from:", req.body.MediaUrl0);
+    
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CONFIG.VOICE_TIMEOUT);
+    
+    // 1. Fetch audio with Twilio auth
+    const response = await fetch(req.body.MediaUrl0, {
+      headers: {
+        'Authorization': 'Basic ' + Buffer.from(
+          `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+        ).toString('base64')
+      },
+      signal: controller.signal
+    });
 
-        const contentType = response.headers.get('content-type');
-        if (!contentType?.includes('audio/ogg')) {
-          throw new Error('Invalid audio content type');
-        }
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    
+    // 2. Get audio as Buffer
+    const audioBuffer = await response.buffer();
+    
+    // 3. Create File object properly
+    const audioFile = {
+      name: 'voice_message.ogg',
+      type: 'audio/ogg',
+      data: audioBuffer
+    };
 
-        // Convert response to buffer
-        const audioBuffer = await response.buffer();
-        
-        // Create stream from buffer
-        const audioStream = new Readable();
-        audioStream.push(audioBuffer);
-        audioStream.push(null); // Signal end of stream
-        
-        // Create FormData properly
-        const form = new FormData();
-        form.append('file', audioStream, {
-          filename: 'voice_message.ogg',
-          contentType: 'audio/ogg',
-          knownLength: audioBuffer.length
-        });
-
-        // Add other required fields
-        form.append('model', CONFIG.WHISPER_MODEL);
-        form.append('response_format', 'text');
-        form.append('temperature', '0.2');
-
-        const transcription = await openai.audio.transcriptions.create({
-          file: form,
-          model: CONFIG.WHISPER_MODEL
-        });
-        
-        textToProcess = transcription.text;
-        console.log("Transcription success:", textToProcess);
-        
-      } catch (error) {
-        console.error("Voice processing error:", error);
-        textToProcess = "[Couldn't process voice message. Please try again or type your message.]";
-      }
-    }
-
+    // 4. Create transcription
+    const transcription = await openai.audio.transcriptions.create({
+      file: audioFile,
+      model: CONFIG.WHISPER_MODEL,
+      response_format: "text"
+    });
+    
+    textToProcess = transcription.text;
+    console.log("Transcription success:", textToProcess);
+    
+  } catch (error) {
+    console.error("Voice processing error:", error);
+    textToProcess = "[Voice note processing failed. Please try again.]";
+  }
+}
     // AI response
     const aiResponse = await openai.chat.completions.create({
       model: CONFIG.GPT_MODEL,
