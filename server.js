@@ -10,7 +10,7 @@ const app = express();
 // Initialize APIs
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 10000
+  timeout: 20000
 });
 
 const twilioClient = twilio(
