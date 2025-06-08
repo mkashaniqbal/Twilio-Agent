@@ -3,13 +3,13 @@ const express = require('express');
 const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fetch = require('node-fetch');
-const { Readable } = require('stream');
 const app = express();
 
-// Initialize APIs with robust configuration
+// Configure OpenAI with robust settings
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 30000 // 30 second timeout
+  timeout: 25000, // 25 seconds
+  maxRetries: 2
 });
 
 const twilioClient = twilio(
@@ -17,172 +17,126 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// Enhanced middleware
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ 
-  extended: false,
-  verify: (req, res, buf) => {
-    req.rawBody = buf.toString();
-  }
-}));
+// Middleware with proper error handling
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-// Optimized configuration
+// Configuration
 const CONFIG = {
-  VOICE_TIMEOUT: 20000, // 20 seconds for voice processing
   GPT_MODEL: "gpt-4o",
-  MAX_TOKENS: 150,
   WHISPER_MODEL: "whisper-1",
-  MAX_AUDIO_SIZE: 10 * 1024 * 1024 // 10MB
+  MAX_TOKENS: 200,
+  VOICE_TIMEOUT: 15000, // 15 seconds
+  GPT_TIMEOUT: 10000 // 10 seconds
 };
 
-// WhatsApp Webhook with comprehensive error handling
+// Enhanced WhatsApp endpoint
 app.post('/whatsapp', async (req, res) => {
+  let responseSent = false;
+  
   try {
-    console.log("Incoming request from:", req.body.From);
+    console.log("New message from:", req.body.From);
     
-    let textToProcess = req.body.Body || '';
-    let isVoiceMessage = false;
+    // Process message content
+    let userMessage = req.body.Body || '';
+    const isMedia = req.body.NumMedia > 0;
 
-    // Voice message processing with multiple fallbacks
-    if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
-      isVoiceMessage = true;
+    // Handle voice messages
+    if (isMedia && req.body.MediaContentType0 === 'audio/ogg') {
       try {
-        console.log("Processing voice message from:", req.body.MediaUrl0);
+        console.log("Processing voice message...");
         
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), CONFIG.VOICE_TIMEOUT);
-        
-        // 1. Fetch audio with Twilio auth
-        const response = await fetch(req.body.MediaUrl0, {
+        // Fetch audio with timeout
+        const audioResponse = await fetch(req.body.MediaUrl0, {
           headers: {
             'Authorization': 'Basic ' + Buffer.from(
               `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
             ).toString('base64')
           },
-          signal: controller.signal
+          timeout: CONFIG.VOICE_TIMEOUT
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        if (!audioResponse.ok) {
+          throw new Error(`Audio fetch failed: ${audioResponse.status}`);
         }
 
-        // Verify content length
-        const contentLength = response.headers.get('content-length');
-        if (contentLength && parseInt(contentLength) > CONFIG.MAX_AUDIO_SIZE) {
-          throw new Error(`Audio file too large (max ${CONFIG.MAX_AUDIO_SIZE/1024/1024}MB)`);
-        }
+        // Process with Whisper
+        const transcription = await openai.audio.transcriptions.create({
+          file: await audioResponse.blob(),
+          model: CONFIG.WHISPER_MODEL,
+          response_format: "text"
+        }, { timeout: CONFIG.VOICE_TIMEOUT });
 
-        // 2. Get audio as Buffer
-        const audioBuffer = await response.buffer();
-        
-        // 3. Create proper file object for OpenAI
-        const audioFile = {
-          name: 'voice_message.ogg',
-          type: 'audio/ogg',
-          data: audioBuffer
-        };
-
-        // 4. Create transcription with timeout
-        const transcription = await Promise.race([
-          openai.audio.transcriptions.create({
-            file: audioFile,
-            model: CONFIG.WHISPER_MODEL,
-            response_format: "text"
-          }),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Whisper API timeout')), CONFIG.VOICE_TIMEOUT)
-          )
-        ]);
-        
-        textToProcess = transcription.text;
-        console.log("Transcription success:", textToProcess);
+        userMessage = transcription.text;
+        console.log("Transcribed:", userMessage.substring(0, 50) + "...");
         
       } catch (error) {
-        console.error("Voice processing error:", {
-          error: error.message,
-          stack: error.stack
-        });
-        textToProcess = "[Couldn't process voice message. Please try again or type your message.]";
+        console.error("Voice processing failed:", error.message);
+        userMessage = "[Voice message not understood. Please try again]";
       }
     }
 
-    // AI response with fallback
-    let replyText = "[Sorry, I couldn't generate a response.]";
+    // Generate AI response
+    let aiResponse = "Sorry, I couldn't generate a response.";
     try {
-      const aiResponse = await openai.chat.completions.create({
+      const completion = await openai.chat.completions.create({
         model: CONFIG.GPT_MODEL,
-        messages: [{ 
-          role: "user", 
-          content: textToProcess || "[Empty message received]"
+        messages: [{
+          role: "user",
+          content: userMessage || "Hello"
         }],
         max_tokens: CONFIG.MAX_TOKENS,
-        temperature: 0.7,
-        timeout: 15000 // 15 seconds for GPT
-      });
+        temperature: 0.7
+      }, { timeout: CONFIG.GPT_TIMEOUT });
 
-      replyText = aiResponse.choices[0].message.content
-        .replace(/\n/g, ' ') // Single line for better readability
-        .substring(0, 160); // SMS length limit
+      aiResponse = completion.choices[0].message.content;
     } catch (error) {
-      console.error("GPT processing error:", error);
+      console.error("GPT error:", error.message);
+      aiResponse = "I'm having trouble responding right now. Please try again later.";
     }
 
-    // Send reply with retry logic
+    // Send Twilio response
     try {
       await twilioClient.messages.create({
-        body: replyText,
+        body: aiResponse.substring(0, 1600), // WhatsApp limit
         from: req.body.To,
-        to: req.body.From,
-        shortenUrls: true
+        to: req.body.From
       });
     } catch (twilioError) {
-      console.error("Twilio send error:", {
-        code: twilioError.code,
-        message: twilioError.message,
-        moreInfo: twilioError.moreInfo
-      });
-      // Implement retry logic here if needed
+      console.error("Twilio send failed:", twilioError.message);
     }
 
-    res.status(200).end();
+    if (!responseSent) {
+      res.status(200).end();
+      responseSent = true;
+    }
+
   } catch (error) {
-    console.error('Endpoint error:', {
-      name: error.name,
-      message: error.message,
-      stack: error.stack
-    });
-    res.status(500).json({ 
-      error: "Internal server error",
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    console.error("Endpoint crashed:", error);
+    if (!responseSent) {
+      res.status(500).json({ error: "Server error" });
+      responseSent = true;
+    }
   }
 });
 
-// Enhanced health check
+// Health check
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'running',
-    version: '1.0',
-    capabilities: {
-      whatsapp: true,
-      voice: true,
-      model: CONFIG.GPT_MODEL
+    status: "active",
+    services: {
+      openai: true,
+      twilio: true
     }
   });
 });
 
-// Robust server startup
+// Start server
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-});
-
-// Handle shutdown gracefully
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    console.log('Server terminated');
-    process.exit(0);
+  console.log("Configuration:", {
+    model: CONFIG.GPT_MODEL,
+    maxTokens: CONFIG.MAX_TOKENS
   });
 });
