@@ -44,7 +44,7 @@ app.post('/whatsapp', async (req, res) => {
     let isVoiceMessage = false;
 
     // Voice message processing
-   if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
+if (req.body.MediaUrl0 && req.body.MediaContentType0 === 'audio/ogg') {
   isVoiceMessage = true;
   try {
     console.log("Processing voice message from:", req.body.MediaUrl0);
@@ -62,19 +62,25 @@ app.post('/whatsapp', async (req, res) => {
       signal: controller.signal
     });
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    // 2. Get audio as ArrayBuffer
+    const audioArrayBuffer = await response.arrayBuffer();
     
-    // 2. Get audio as Buffer
-    const audioBuffer = await response.buffer();
+    // 3. Create a Readable stream from the buffer
+    const { Readable } = require('stream');
+    const audioStream = Readable.from(Buffer.from(audioArrayBuffer));
     
-    // 3. Create File object properly
+    // 4. Create proper file object for OpenAI
     const audioFile = {
       name: 'voice_message.ogg',
       type: 'audio/ogg',
-      data: audioBuffer
+      stream: () => audioStream
     };
 
-    // 4. Create transcription
+    // 5. Create transcription
     const transcription = await openai.audio.transcriptions.create({
       file: audioFile,
       model: CONFIG.WHISPER_MODEL,
@@ -86,8 +92,12 @@ app.post('/whatsapp', async (req, res) => {
     
   } catch (error) {
     console.error("Voice processing error:", error);
-    textToProcess = "[Voice note processing failed. Please try again.]";
+    textToProcess = "[Voice note processing failed. Please try again or type your message.]";
   }
+}
+const contentLength = response.headers.get('content-length');
+if (!contentLength || parseInt(contentLength) > 10 * 1024 * 1024) { // 10MB limit
+  throw new Error('Audio file too large');
 }
     // AI response
     const aiResponse = await openai.chat.completions.create({
