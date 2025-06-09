@@ -40,8 +40,7 @@ const CONFIG = {
 
 // Convert OGG to MP3 (you can improve this logic based on your needs)
 async function convertOggToMp3(oggBuffer) {
-  // You need an external library for conversion, or you can use an API.
-  // Here's a placeholder function. Replace it with actual conversion logic
+  // Placeholder conversion logic. Replace with actual conversion.
   return oggBuffer; // Simply returning the buffer for now.
 }
 
@@ -105,11 +104,12 @@ app.post('/whatsapp', async (req, res) => {
         console.log("📜 Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
       } catch (error) {
         console.error("❌ Voice processing failed:", error);
-        userMessage = "[Voice message not understood. Please try again]";
+        userMessage = "[Voice message not understood. Please try again]";  // Fallback message
       }
     }
 
-    let aiResponse = "I'm having trouble responding. Please try again later.";
+    let aiResponse = "I'm having trouble responding. Please try again later."; // Default response
+
     if (userMessage) {
       try {
         const completion = await openai.chat.completions.create({
@@ -127,15 +127,23 @@ app.post('/whatsapp', async (req, res) => {
           max_tokens: CONFIG.MAX_TOKENS,
           temperature: 0.7
         });
-        aiResponse = completion.choices[0].message.content;
+
+        aiResponse = completion.choices[0].message.content;  // Update with the AI's response
       } catch (error) {
         console.error("❌ OpenAI error:", error);
       }
     }
 
+    // Ensure aiResponse doesn't exceed the maximum message length
+    aiResponse = aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH);
+
+    // Log the response to be sent to WhatsApp
+    console.log("Transcription to send to Twilio:", aiResponse);
+
+    // Send back the transcription to WhatsApp via Twilio
     try {
       await twilioClient.messages.create({
-        body: aiResponse,
+        body: aiResponse,  // Ensure this contains the transcription
         from: req.body.To,
         to: req.body.From
       });
