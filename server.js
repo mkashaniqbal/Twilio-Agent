@@ -3,14 +3,14 @@ const express = require('express');
 const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fetch = require('node-fetch');
-const { Blob } = require('buffer');
-const FormData = require('form-data');
+const fs = require('fs');
+const { Readable } = require('stream');
 const app = express();
 
-// Configure OpenAI with enhanced settings
+// Configure OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 30000, // 30 seconds timeout
+  timeout: 30000,
   maxRetries: 3
 });
 
@@ -19,11 +19,10 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// Middleware with proper configuration
+// Middleware
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
-// Configuration constants
 const CONFIG = {
   GPT_MODEL: "gpt-4o",
   WHISPER_MODEL: "whisper-1",
@@ -33,16 +32,7 @@ const CONFIG = {
   MAX_MESSAGE_LENGTH: 1600
 };
 
-// Polyfill for File in Node.js
-global.File = class File extends Blob {
-  constructor(blobParts, name, options) {
-    super(blobParts, options);
-    this.name = name;
-    this.lastModified = options?.lastModified || Date.now();
-  }
-};
-
-// Improved voice message processor
+// Improved voice processor using streams
 async function processVoiceMessage(mediaUrl) {
   try {
     console.log("Fetching voice message from:", mediaUrl);
@@ -52,36 +42,36 @@ async function processVoiceMessage(mediaUrl) {
         'Authorization': 'Basic ' + Buffer.from(
           `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
         ).toString('base64')
-      },
-      timeout: CONFIG.VOICE_TIMEOUT
+      }
     });
 
     if (!audioResponse.ok) {
       throw new Error(`Audio fetch failed: ${audioResponse.status}`);
     }
 
-    const audioBuffer = await audioResponse.buffer();
-    const audioBlob = new Blob([audioBuffer], { type: 'audio/ogg' });
+    // Convert response to stream
+    const audioStream = Readable.fromWeb(audioResponse.body);
     
-    // Create proper File object
-    const audioFile = new File([audioBlob], 'voice-message.ogg', {
-      type: 'audio/ogg',
-      lastModified: Date.now()
+    // Create a temporary file
+    const tempFilePath = `/tmp/voice-${Date.now()}.ogg`;
+    const writeStream = fs.createWriteStream(tempFilePath);
+    
+    await new Promise((resolve, reject) => {
+      audioStream.pipe(writeStream)
+        .on('finish', resolve)
+        .on('error', reject);
     });
-
-    // Create FormData for Whisper API
-    const formData = new FormData();
-    formData.append('file', audioFile);
-    formData.append('model', CONFIG.WHISPER_MODEL);
-    formData.append('response_format', 'text');
 
     console.log("Transcribing audio...");
     const transcription = await openai.audio.transcriptions.create({
-      file: audioFile,
+      file: fs.createReadStream(tempFilePath),
       model: CONFIG.WHISPER_MODEL,
       response_format: "text"
     });
 
+    // Clean up
+    fs.unlink(tempFilePath, () => {});
+    
     return transcription.text;
   } catch (error) {
     console.error("Voice processing error:", error);
@@ -89,7 +79,7 @@ async function processVoiceMessage(mediaUrl) {
   }
 }
 
-// Enhanced WhatsApp endpoint
+// WhatsApp endpoint remains the same as previous working version
 app.post('/whatsapp', async (req, res) => {
   try {
     console.log("Incoming message from:", req.body.From);
@@ -151,14 +141,7 @@ app.post('/whatsapp', async (req, res) => {
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({
-    status: "running",
-    services: {
-      openai: true,
-      twilio: true,
-      whisper: true
-    }
-  });
+  res.json({ status: "running" });
 });
 
 const PORT = process.env.PORT || 3000;
