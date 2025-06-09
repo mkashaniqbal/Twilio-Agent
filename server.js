@@ -4,8 +4,6 @@ const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fetch = require('node-fetch');
 const fs = require('fs');
-const path = require('path');
-const { randomUUID } = require('crypto');
 const { Readable } = require('stream');
 const app = express();
 
@@ -13,7 +11,7 @@ if (typeof globalThis.File === 'undefined') {
   globalThis.File = require('node:buffer').File;
 }
 
-
+// Configure OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   timeout: 30000,
@@ -38,19 +36,12 @@ const CONFIG = {
   MAX_MESSAGE_LENGTH: 1600
 };
 
-// Convert OGG to MP3 (you can improve this logic based on your needs)
-async function convertOggToMp3(oggBuffer) {
-  // You need an external library for conversion, or you can use an API.
-  // Here's a placeholder function. Replace it with actual conversion logic
-  return oggBuffer; // Simply returning the buffer for now.
-}
-
 // Robust voice processor using buffers
 async function processVoiceMessage(mediaUrl) {
   try {
-    console.log("📥 Fetching media from:", mediaUrl);
+    console.log("Fetching media from:", mediaUrl);
 
-    const response = await fetch(mediaUrl, {
+    const audioResponse = await fetch(mediaUrl, {
       headers: {
         'Authorization': 'Basic ' + Buffer.from(
           `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
@@ -58,43 +49,35 @@ async function processVoiceMessage(mediaUrl) {
       }
     });
 
-    if (!response.ok) {
-      throw new Error(`Fetch failed with status ${response.status}`);
+    if (!audioResponse.ok) {
+      throw new Error(`Audio fetch failed: ${audioResponse.status}`);
     }
 
-    const oggBuffer = await response.buffer();
-    console.log("✅ Downloaded voice file, size:", oggBuffer.length);
-
-    const mp3Buffer = await convertOggToMp3(oggBuffer);
-    console.log("🎧 Converted to MP3, size:", mp3Buffer.length);
-
-    // Save MP3 to temp file
-    const tempFileName = `voice-${randomUUID()}.mp3`;
-    const tempFilePath = path.join(__dirname, tempFileName);
-    fs.writeFileSync(tempFilePath, mp3Buffer);
-
-    console.log("📝 Transcribing with OpenAI Whisper...");
+    // Get audio as buffer
+    const audioBuffer = await audioResponse.buffer();
+    
+    // Create a readable stream from buffer
+    const audioStream = Readable.from(audioBuffer);
+    
+    console.log("Transcribing audio...");
     const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempFilePath),
+      file: audioStream,
       model: CONFIG.WHISPER_MODEL,
       response_format: "text"
     });
 
-    // Clean up temp file
-    fs.unlinkSync(tempFilePath);
-
-    console.log("📜 Transcription received:", transcription);
-    return transcription.text || ''; // Ensure the transcription is retrieved
-  } catch (err) {
-    console.error("❌ Voice Processing Error:", err.message);
-    return '';
+    console.log("Full transcription response:", transcription); // Log full transcription response
+    return transcription.text || "Sorry, I couldn't understand the voice message.";
+  } catch (error) {
+    console.error("Voice processing error:", error);
+    throw error;
   }
 }
 
-// WhatsApp endpoint
+// WhatsApp endpoint (unchanged from working version)
 app.post('/whatsapp', async (req, res) => {
   try {
-    console.log("📲 Incoming message from:", req.body.From);
+    console.log("Incoming message from:", req.body.From);
     
     let userMessage = req.body.Body || '';
     const isMedia = req.body.NumMedia > 0;
@@ -102,9 +85,9 @@ app.post('/whatsapp', async (req, res) => {
     if (isMedia && req.body.MediaContentType0?.startsWith('audio/')) {
       try {
         userMessage = await processVoiceMessage(req.body.MediaUrl0);
-        console.log("📜 Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
+        console.log("Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
       } catch (error) {
-        console.error("❌ Voice processing failed:", error);
+        console.error("Voice processing failed:", error);
         userMessage = "[Voice message not understood. Please try again]";
       }
     }
@@ -129,24 +112,28 @@ app.post('/whatsapp', async (req, res) => {
         });
         aiResponse = completion.choices[0].message.content;
       } catch (error) {
-        console.error("❌ OpenAI error:", error);
+        console.error("OpenAI error:", error);
       }
     }
 
+    // Ensure response is within the message length limit
+    aiResponse = aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH);
+
+    // Send the response to the user
     try {
       await twilioClient.messages.create({
-        body: aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH),
+        body: aiResponse,
         from: req.body.To,
         to: req.body.From
       });
-      console.log("✅ Reply sent");
+      console.log("Reply sent:", aiResponse);
     } catch (error) {
-      console.error("❌ Twilio error:", error);
+      console.error("Twilio error:", error);
     }
 
     res.status(200).end();
   } catch (error) {
-    console.error("❌ Server error:", error);
+    console.error("Server error:", error);
     res.status(500).json({ error: error.message });
   }
 });
