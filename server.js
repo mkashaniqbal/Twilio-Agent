@@ -9,6 +9,11 @@ const { randomUUID } = require('crypto');
 const { Readable } = require('stream');
 const app = express();
 
+if (typeof globalThis.File === 'undefined') {
+  globalThis.File = require('node:buffer').File;
+}
+
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   timeout: 30000,
