@@ -94,7 +94,7 @@ async function processVoiceMessage(mediaUrl) {
 app.post('/whatsapp', async (req, res) => {
   try {
     console.log("📲 Incoming message from:", req.body.From);
-    
+
     let userMessage = req.body.Body || '';
     const isMedia = req.body.NumMedia > 0;
 
@@ -104,12 +104,13 @@ app.post('/whatsapp', async (req, res) => {
         console.log("📜 Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
       } catch (error) {
         console.error("❌ Voice processing failed:", error);
-        userMessage = "[Voice message not understood. Please try again]";  // Fallback message
+        userMessage = "[Voice message not understood. Please try again]";
       }
     }
 
     let aiResponse = "I'm having trouble responding. Please try again later."; // Default response
 
+    // Check if userMessage is valid and proceed with AI processing
     if (userMessage) {
       try {
         const completion = await openai.chat.completions.create({
@@ -128,13 +129,14 @@ app.post('/whatsapp', async (req, res) => {
           temperature: 0.7
         });
 
-        aiResponse = completion.choices[0].message.content;  // Update with the AI's response
+        // Ensure we have a valid AI response
+        aiResponse = completion.choices[0].message.content || aiResponse;
       } catch (error) {
         console.error("❌ OpenAI error:", error);
       }
     }
 
-    // Ensure aiResponse doesn't exceed the maximum message length
+    // Make sure aiResponse doesn't exceed the maximum message length
     aiResponse = aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH);
 
     // Log the response to be sent to WhatsApp
@@ -143,7 +145,7 @@ app.post('/whatsapp', async (req, res) => {
     // Send back the transcription to WhatsApp via Twilio
     try {
       await twilioClient.messages.create({
-        body: aiResponse,  // Ensure this contains the transcription
+        body: aiResponse, // This will send the correct transcription response
         from: req.body.To,
         to: req.body.From
       });
