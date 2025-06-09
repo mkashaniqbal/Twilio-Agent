@@ -32,7 +32,7 @@ const CONFIG = {
   MAX_MESSAGE_LENGTH: 1600
 };
 
-// Improved voice processor using streams
+// Robust voice processor using buffers
 async function processVoiceMessage(mediaUrl) {
   try {
     console.log("Fetching voice message from:", mediaUrl);
@@ -49,29 +49,19 @@ async function processVoiceMessage(mediaUrl) {
       throw new Error(`Audio fetch failed: ${audioResponse.status}`);
     }
 
-    // Convert response to stream
-    const audioStream = Readable.fromWeb(audioResponse.body);
+    // Get audio as buffer
+    const audioBuffer = await audioResponse.buffer();
     
-    // Create a temporary file
-    const tempFilePath = `/tmp/voice-${Date.now()}.ogg`;
-    const writeStream = fs.createWriteStream(tempFilePath);
+    // Create a readable stream from buffer
+    const audioStream = Readable.from(audioBuffer);
     
-    await new Promise((resolve, reject) => {
-      audioStream.pipe(writeStream)
-        .on('finish', resolve)
-        .on('error', reject);
-    });
-
     console.log("Transcribing audio...");
     const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempFilePath),
+      file: audioStream,
       model: CONFIG.WHISPER_MODEL,
       response_format: "text"
     });
 
-    // Clean up
-    fs.unlink(tempFilePath, () => {});
-    
     return transcription.text;
   } catch (error) {
     console.error("Voice processing error:", error);
@@ -79,7 +69,7 @@ async function processVoiceMessage(mediaUrl) {
   }
 }
 
-// WhatsApp endpoint remains the same as previous working version
+// WhatsApp endpoint (unchanged from working version)
 app.post('/whatsapp', async (req, res) => {
   try {
     console.log("Incoming message from:", req.body.From);
