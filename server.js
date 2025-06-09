@@ -4,11 +4,10 @@ const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fetch = require('node-fetch');
 const fs = require('fs');
-const { Readable, PassThrough } = require('stream');
+const { Readable } = require('stream');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
-
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = require('node:buffer').File;
@@ -16,11 +15,8 @@ if (typeof globalThis.File === 'undefined') {
 
 const app = express();
 
-// OpenAI + Twilio config
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 30000,
-  maxRetries: 3
 });
 
 const twilioClient = twilio(
@@ -28,7 +24,6 @@ const twilioClient = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// Middleware
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
@@ -36,36 +31,34 @@ const CONFIG = {
   GPT_MODEL: "gpt-4o",
   WHISPER_MODEL: "whisper-1",
   MAX_TOKENS: 300,
-  VOICE_TIMEOUT: 20000,
-  GPT_TIMEOUT: 15000,
   MAX_MESSAGE_LENGTH: 1600
 };
 
-// 🌀 Convert .ogg (Opus) to .mp3 using ffmpeg
-async function convertOggToMp3(buffer) {
+// 🧠 OGG to MP3 converter using FFMPEG
+async function convertOggToMp3(oggBuffer) {
   return new Promise((resolve, reject) => {
-    const inputStream = new PassThrough();
+    const inputStream = Readable.from(oggBuffer);
     const outputChunks = [];
-
-    inputStream.end(buffer);
 
     ffmpeg(inputStream)
       .inputFormat('ogg')
       .audioCodec('libmp3lame')
       .format('mp3')
       .on('error', reject)
-      .on('end', () => resolve(Buffer.concat(outputChunks)))
+      .on('end', () => {
+        resolve(Buffer.concat(outputChunks));
+      })
       .pipe()
       .on('data', chunk => outputChunks.push(chunk));
   });
 }
 
-// 🎙️ Voice processing handler
+// 🎙️ Process WhatsApp voice message
 async function processVoiceMessage(mediaUrl) {
   try {
-    console.log("Fetching voice message from:", mediaUrl);
-    
-    const audioResponse = await fetch(mediaUrl, {
+    console.log("📥 Fetching media from:", mediaUrl);
+
+    const response = await fetch(mediaUrl, {
       headers: {
         'Authorization': 'Basic ' + Buffer.from(
           `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
@@ -73,49 +66,58 @@ async function processVoiceMessage(mediaUrl) {
       }
     });
 
-    if (!audioResponse.ok) {
-      throw new Error(`Audio fetch failed: ${audioResponse.status}`);
+    if (!response.ok) {
+      throw new Error(`Fetch failed with status ${response.status}`);
     }
 
-    const oggBuffer = await audioResponse.buffer();
+    const oggBuffer = await response.buffer();
+    console.log("✅ Downloaded voice file, size:", oggBuffer.length);
+
     const mp3Buffer = await convertOggToMp3(oggBuffer);
+    console.log("🎧 Converted to MP3, size:", mp3Buffer.length);
 
     const file = new File([mp3Buffer], 'voice.mp3', { type: 'audio/mpeg' });
 
-    console.log("Transcribing audio...");
+    console.log("📝 Transcribing with OpenAI Whisper...");
     const transcription = await openai.audio.transcriptions.create({
       file,
       model: CONFIG.WHISPER_MODEL,
       response_format: "text"
     });
 
-    return transcription.text;
-  } catch (error) {
-    console.error("Voice processing error:", error);
-    throw error;
+    console.log("📜 Transcription received:", transcription.text);
+    return transcription.text || '';
+  } catch (err) {
+    console.error("❌ Voice Processing Error:", err.message);
+    throw err;
   }
 }
 
-// 📩 WhatsApp webhook
+// 🚀 WhatsApp Webhook
 app.post('/whatsapp', async (req, res) => {
   try {
-    console.log("Incoming message from:", req.body.From);
-    
-    let userMessage = req.body.Body || '';
+    const from = req.body.From;
+    const to = req.body.To;
     const isMedia = req.body.NumMedia > 0;
+    const contentType = req.body.MediaContentType0?.toLowerCase() || '';
+    let userMessage = req.body.Body || '';
 
-    // Handle audio
-    if (isMedia && req.body.MediaContentType0?.startsWith('audio/')) {
+    console.log("📲 Incoming message from:", from);
+
+    if (isMedia && (contentType.includes('audio') || contentType.includes('ogg'))) {
       try {
         userMessage = await processVoiceMessage(req.body.MediaUrl0);
-        console.log("Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
-      } catch (error) {
+        if (!userMessage.trim()) {
+          userMessage = "[Voice message not understood. Please try again]";
+        }
+      } catch {
         userMessage = "[Voice message not understood. Please try again]";
       }
     }
 
     let aiResponse = "I'm having trouble responding. Please try again later.";
-    if (userMessage) {
+
+    if (userMessage && !userMessage.startsWith("[")) {
       try {
         const completion = await openai.chat.completions.create({
           model: CONFIG.GPT_MODEL,
@@ -134,24 +136,23 @@ app.post('/whatsapp', async (req, res) => {
         });
         aiResponse = completion.choices[0].message.content;
       } catch (error) {
-        console.error("OpenAI error:", error);
+        console.error("❌ GPT Error:", error.message);
       }
+    } else {
+      aiResponse = userMessage; // fallback message already set
     }
 
-    try {
-      await twilioClient.messages.create({
-        body: aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH),
-        from: req.body.To,
-        to: req.body.From
-      });
-      console.log("Reply sent");
-    } catch (error) {
-      console.error("Twilio error:", error);
-    }
+    // ✉️ Send response via Twilio
+    await twilioClient.messages.create({
+      body: aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH),
+      from: to,
+      to: from
+    });
 
+    console.log("✅ Reply sent");
     res.status(200).end();
   } catch (error) {
-    console.error("Server error:", error);
+    console.error("💥 Server error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -163,5 +164,5 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server ready on port ${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
