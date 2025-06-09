@@ -94,73 +94,80 @@ async function processVoiceMessage(mediaUrl) {
 // WhatsApp endpoint
 app.post('/whatsapp', async (req, res) => {
   try {
-    console.log("📲 Incoming message from:", req.body.From);
+    const from = req.body.From;
+    const to = req.body.To;
+    const numMedia = parseInt(req.body.NumMedia, 10);
+    const isAudio = req.body.MediaContentType0?.includes('audio');
 
-    let userMessage = req.body.Body || '';
-    const isMedia = req.body.NumMedia > 0;
+    console.log("📲 Incoming message from:", from);
 
-    if (isMedia && req.body.MediaContentType0?.startsWith('audio/')) {
+    let userMessage = req.body.Body?.trim() || "";
+    let transcriptionUsed = false;
+
+    // Handle voice messages
+    if (numMedia > 0 && isAudio) {
+      const mediaUrl = req.body.MediaUrl0;
+      console.log("📥 Fetching media from:", mediaUrl);
+
       try {
-        userMessage = await processVoiceMessage(req.body.MediaUrl0);
-        console.log("📜 Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
-      } catch (error) {
-        console.error("❌ Voice processing failed:", error);
-        userMessage = "[Voice message not understood. Please try again]";
+        userMessage = await processVoiceMessage(mediaUrl);
+        transcriptionUsed = true;
+        console.log("📝 Transcription received:", userMessage);
+      } catch (err) {
+        console.error("❌ Failed to process voice message:", err);
+        userMessage = "Sorry, I couldn't understand your voice message.";
       }
     }
 
-    // Check if there's an actual transcription or fallback to default message
-    let aiResponse = userMessage || "I'm having trouble responding. Please try again later.";
-
-    if (userMessage && userMessage !== "[Voice message not understood. Please try again]") {
-      // Proceed to OpenAI API if transcription is valid
-      try {
-        const completion = await openai.chat.completions.create({
-          model: CONFIG.GPT_MODEL,
-          messages: [
-            {
-              role: "system",
-              content: "You're a helpful WhatsApp assistant. Respond concisely."
-            },
-            {
-              role: "user",
-              content: userMessage
-            }
-          ],
-          max_tokens: CONFIG.MAX_TOKENS,
-          temperature: 0.7
-        });
-
-        // Ensure we have a valid AI response
-        aiResponse = completion.choices[0].message.content || aiResponse;
-        console.log("✅ OpenAI AI Response:", aiResponse);
-      } catch (error) {
-        console.error("❌ OpenAI error:", error);
-      }
+    // If still no user message, send fallback
+    if (!userMessage) {
+      console.warn("⚠️ Empty message. Sending fallback.");
+      userMessage = "I'm having trouble understanding your message. Please try again.";
     }
 
-    // Ensure aiResponse doesn't exceed max message length
-    aiResponse = aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH);
+    // Generate AI response
+    let aiResponse = "";
 
-    // Log the response that will be sent to Twilio
-    console.log("Transcription to send to Twilio:", aiResponse);
-
-    // Send back the response to WhatsApp via Twilio
     try {
-      await twilioClient.messages.create({
-        body: aiResponse, // Use the correct transcription (or AI response)
-        from: req.body.To,
-        to: req.body.From
+      const completion = await openai.chat.completions.create({
+        model: CONFIG.GPT_MODEL,
+        messages: [
+          { role: "system", content: "You're a helpful WhatsApp assistant. Respond concisely." },
+          { role: "user", content: userMessage }
+        ],
+        max_tokens: CONFIG.MAX_TOKENS,
+        temperature: 0.7
       });
-      console.log("✅ Reply sent");
-    } catch (error) {
-      console.error("❌ Twilio error:", error);
+
+      aiResponse = completion.choices[0].message.content.trim();
+      console.log("💬 AI Response:", aiResponse);
+    } catch (err) {
+      console.error("❌ OpenAI error:", err);
+      aiResponse = "Sorry, I'm having trouble generating a response right now.";
     }
 
-    res.status(200).end();
+    // Trim response if needed
+    if (aiResponse.length > CONFIG.MAX_MESSAGE_LENGTH) {
+      aiResponse = aiResponse.slice(0, CONFIG.MAX_MESSAGE_LENGTH);
+    }
+
+    // Send message via Twilio
+    try {
+      const sentMessage = await twilioClient.messages.create({
+        body: aiResponse,
+        from: to, // Twilio number like whatsapp:+14155238886
+        to: from  // User number like whatsapp:+923317430602
+      });
+
+      console.log("✅ Reply sent:", sentMessage.sid);
+    } catch (err) {
+      console.error("❌ Failed to send WhatsApp reply:", err);
+    }
+
+    res.sendStatus(200);
   } catch (error) {
-    console.error("❌ Server error:", error);
-    res.status(500).json({ error: error.message });
+    console.error("❌ Unhandled error in /whatsapp:", error);
+    res.sendStatus(500);
   }
 });
 
