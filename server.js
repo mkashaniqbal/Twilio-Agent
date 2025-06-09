@@ -4,6 +4,7 @@ const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fetch = require('node-fetch');
 const { Blob } = require('buffer');
+const FormData = require('form-data');
 const app = express();
 
 // Configure OpenAI with enhanced settings
@@ -19,7 +20,7 @@ const twilioClient = twilio(
 );
 
 // Middleware with proper configuration
-app.use(express.json({ limit: '5mb' })); // Increased for voice messages
+app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 // Configuration constants
@@ -27,12 +28,21 @@ const CONFIG = {
   GPT_MODEL: "gpt-4o",
   WHISPER_MODEL: "whisper-1",
   MAX_TOKENS: 300,
-  VOICE_TIMEOUT: 20000, // 20 seconds
-  GPT_TIMEOUT: 15000, // 15 seconds
-  MAX_MESSAGE_LENGTH: 1600 // WhatsApp character limit
+  VOICE_TIMEOUT: 20000,
+  GPT_TIMEOUT: 15000,
+  MAX_MESSAGE_LENGTH: 1600
 };
 
-// Helper function to process voice messages
+// Polyfill for File in Node.js
+global.File = class File extends Blob {
+  constructor(blobParts, name, options) {
+    super(blobParts, options);
+    this.name = name;
+    this.lastModified = options?.lastModified || Date.now();
+  }
+};
+
+// Improved voice message processor
 async function processVoiceMessage(mediaUrl) {
   try {
     console.log("Fetching voice message from:", mediaUrl);
@@ -47,22 +57,34 @@ async function processVoiceMessage(mediaUrl) {
     });
 
     if (!audioResponse.ok) {
-      throw new Error(`Audio fetch failed with status: ${audioResponse.status}`);
+      throw new Error(`Audio fetch failed: ${audioResponse.status}`);
     }
 
-    const audioBuffer = await audioResponse.arrayBuffer();
-    const audioBlob = new Blob([Buffer.from(audioBuffer)], { type: 'audio/ogg' });
+    const audioBuffer = await audioResponse.buffer();
+    const audioBlob = new Blob([audioBuffer], { type: 'audio/ogg' });
+    
+    // Create proper File object
+    const audioFile = new File([audioBlob], 'voice-message.ogg', {
+      type: 'audio/ogg',
+      lastModified: Date.now()
+    });
 
-    console.log("Transcribing audio with Whisper...");
+    // Create FormData for Whisper API
+    const formData = new FormData();
+    formData.append('file', audioFile);
+    formData.append('model', CONFIG.WHISPER_MODEL);
+    formData.append('response_format', 'text');
+
+    console.log("Transcribing audio...");
     const transcription = await openai.audio.transcriptions.create({
-      file: audioBlob,
+      file: audioFile,
       model: CONFIG.WHISPER_MODEL,
       response_format: "text"
     });
 
     return transcription.text;
   } catch (error) {
-    console.error("Voice processing error:", error.message);
+    console.error("Voice processing error:", error);
     throw error;
   }
 }
@@ -75,83 +97,71 @@ app.post('/whatsapp', async (req, res) => {
     let userMessage = req.body.Body || '';
     const isMedia = req.body.NumMedia > 0;
 
-    // Handle voice messages
     if (isMedia && req.body.MediaContentType0?.startsWith('audio/')) {
       try {
         userMessage = await processVoiceMessage(req.body.MediaUrl0);
-        console.log("Transcription successful:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
+        console.log("Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
       } catch (error) {
-        console.error("Voice message processing failed:", error);
-        userMessage = "[Couldn't process voice message. Please try again or send text]";
+        console.error("Voice processing failed:", error);
+        userMessage = "[Voice message not understood. Please try again]";
       }
     }
 
-    // Generate AI response
-    let aiResponse;
-    try {
-      const completion = await openai.chat.completions.create({
-        model: CONFIG.GPT_MODEL,
-        messages: [{
-          role: "system",
-          content: "You're a helpful WhatsApp assistant. Keep responses concise and friendly."
-        }, {
-          role: "user",
-          content: userMessage || "Hello"
-        }],
-        max_tokens: CONFIG.MAX_TOKENS,
-        temperature: 0.7
-      });
-
-      aiResponse = completion.choices[0].message.content;
-      console.log("Generated response:", aiResponse.substring(0, 50) + "...");
-    } catch (error) {
-      console.error("OpenAI API error:", error.message);
-      aiResponse = "I'm experiencing technical difficulties. Please try again later.";
+    let aiResponse = "I'm having trouble responding. Please try again later.";
+    if (userMessage) {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: CONFIG.GPT_MODEL,
+          messages: [
+            {
+              role: "system",
+              content: "You're a helpful WhatsApp assistant. Respond concisely."
+            },
+            {
+              role: "user",
+              content: userMessage
+            }
+          ],
+          max_tokens: CONFIG.MAX_TOKENS,
+          temperature: 0.7
+        });
+        aiResponse = completion.choices[0].message.content;
+      } catch (error) {
+        console.error("OpenAI error:", error);
+      }
     }
 
-    // Send Twilio response
     try {
       await twilioClient.messages.create({
         body: aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH),
         from: req.body.To,
         to: req.body.From
       });
-      console.log("Response sent successfully");
-    } catch (twilioError) {
-      console.error("Twilio send error:", twilioError.message);
-      throw twilioError;
+      console.log("Reply sent");
+    } catch (error) {
+      console.error("Twilio error:", error);
     }
 
     res.status(200).end();
   } catch (error) {
-    console.error("Endpoint error:", error);
-    res.status(500).json({ 
-      error: "Internal server error",
-      details: error.message 
-    });
+    console.error("Server error:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Enhanced health check
+// Health check
 app.get('/', (req, res) => {
   res.json({
-    status: "operational",
-    timestamp: new Date().toISOString(),
+    status: "running",
     services: {
-      openai: "connected",
-      twilio: "connected",
-      whisper: "ready"
-    },
-    config: {
-      model: CONFIG.GPT_MODEL,
-      max_tokens: CONFIG.MAX_TOKENS
+      openai: true,
+      twilio: true,
+      whisper: true
     }
   });
 });
 
-// Server startup
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log("Configuration:", JSON.stringify(CONFIG, null, 2));
+  console.log(`Server ready on port ${PORT}`);
 });
