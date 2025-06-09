@@ -91,6 +91,7 @@ async function processVoiceMessage(mediaUrl) {
 }
 
 // WhatsApp endpoint
+// WhatsApp endpoint
 app.post('/whatsapp', async (req, res) => {
   try {
     console.log("📲 Incoming message from:", req.body.From);
@@ -108,10 +109,11 @@ app.post('/whatsapp', async (req, res) => {
       }
     }
 
-    let aiResponse = "I'm having trouble responding. Please try again later."; // Default response
+    // Check if there's an actual transcription or fallback to default message
+    let aiResponse = userMessage || "I'm having trouble responding. Please try again later.";
 
-    // Check if userMessage is valid and proceed with AI processing
-    if (userMessage) {
+    if (userMessage && userMessage !== "[Voice message not understood. Please try again]") {
+      // Proceed to OpenAI API if transcription is valid
       try {
         const completion = await openai.chat.completions.create({
           model: CONFIG.GPT_MODEL,
@@ -131,21 +133,22 @@ app.post('/whatsapp', async (req, res) => {
 
         // Ensure we have a valid AI response
         aiResponse = completion.choices[0].message.content || aiResponse;
+        console.log("✅ OpenAI AI Response:", aiResponse);
       } catch (error) {
         console.error("❌ OpenAI error:", error);
       }
     }
 
-    // Make sure aiResponse doesn't exceed the maximum message length
+    // Ensure aiResponse doesn't exceed max message length
     aiResponse = aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH);
 
-    // Log the response to be sent to WhatsApp
+    // Log the response that will be sent to Twilio
     console.log("Transcription to send to Twilio:", aiResponse);
 
-    // Send back the transcription to WhatsApp via Twilio
+    // Send back the response to WhatsApp via Twilio
     try {
       await twilioClient.messages.create({
-        body: aiResponse, // This will send the correct transcription response
+        body: aiResponse, // Use the correct transcription (or AI response)
         from: req.body.To,
         to: req.body.From
       });
