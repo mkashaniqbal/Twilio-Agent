@@ -4,14 +4,19 @@ const { OpenAI } = require('openai');
 const twilio = require('twilio');
 const fetch = require('node-fetch');
 const fs = require('fs');
-const { Readable } = require('stream');
-const app = express();
+const { Readable, PassThrough } = require('stream');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = require('node:buffer').File;
 }
 
-// Configure OpenAI
+const app = express();
+
+// OpenAI + Twilio config
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   timeout: 30000,
@@ -36,7 +41,26 @@ const CONFIG = {
   MAX_MESSAGE_LENGTH: 1600
 };
 
-// Robust voice processor using buffers
+// 🌀 Convert .ogg (Opus) to .mp3 using ffmpeg
+async function convertOggToMp3(buffer) {
+  return new Promise((resolve, reject) => {
+    const inputStream = new PassThrough();
+    const outputChunks = [];
+
+    inputStream.end(buffer);
+
+    ffmpeg(inputStream)
+      .inputFormat('ogg')
+      .audioCodec('libmp3lame')
+      .format('mp3')
+      .on('error', reject)
+      .on('end', () => resolve(Buffer.concat(outputChunks)))
+      .pipe()
+      .on('data', chunk => outputChunks.push(chunk));
+  });
+}
+
+// 🎙️ Voice processing handler
 async function processVoiceMessage(mediaUrl) {
   try {
     console.log("Fetching voice message from:", mediaUrl);
@@ -53,15 +77,14 @@ async function processVoiceMessage(mediaUrl) {
       throw new Error(`Audio fetch failed: ${audioResponse.status}`);
     }
 
-    // Get audio as buffer
-    const audioBuffer = await audioResponse.buffer();
-    
-    // Create a readable stream from buffer
-    const audioStream = Readable.from(audioBuffer);
-    
+    const oggBuffer = await audioResponse.buffer();
+    const mp3Buffer = await convertOggToMp3(oggBuffer);
+
+    const file = new File([mp3Buffer], 'voice.mp3', { type: 'audio/mpeg' });
+
     console.log("Transcribing audio...");
     const transcription = await openai.audio.transcriptions.create({
-      file: audioStream,
+      file,
       model: CONFIG.WHISPER_MODEL,
       response_format: "text"
     });
@@ -73,7 +96,7 @@ async function processVoiceMessage(mediaUrl) {
   }
 }
 
-// WhatsApp endpoint (unchanged from working version)
+// 📩 WhatsApp webhook
 app.post('/whatsapp', async (req, res) => {
   try {
     console.log("Incoming message from:", req.body.From);
@@ -81,12 +104,12 @@ app.post('/whatsapp', async (req, res) => {
     let userMessage = req.body.Body || '';
     const isMedia = req.body.NumMedia > 0;
 
+    // Handle audio
     if (isMedia && req.body.MediaContentType0?.startsWith('audio/')) {
       try {
         userMessage = await processVoiceMessage(req.body.MediaUrl0);
         console.log("Transcription:", userMessage.substring(0, 100) + (userMessage.length > 100 ? "..." : ""));
       } catch (error) {
-        console.error("Voice processing failed:", error);
         userMessage = "[Voice message not understood. Please try again]";
       }
     }
@@ -133,7 +156,7 @@ app.post('/whatsapp', async (req, res) => {
   }
 });
 
-// Health check
+// ✅ Health check
 app.get('/', (req, res) => {
   res.json({ status: "running" });
 });
@@ -142,5 +165,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server ready on port ${PORT}`);
 });
-
-console.log("Running Node version:", process.version);
