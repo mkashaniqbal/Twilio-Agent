@@ -135,7 +135,7 @@ app.post('/whatsapp', async (req, res) => {
 
     try {
       await twilioClient.messages.create({
-        body: aiResponse.substring(0, CONFIG.MAX_MESSAGE_LENGTH),
+        body: aiResponse,
         from: req.body.To,
         to: req.body.From
       });
